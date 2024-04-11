@@ -2,9 +2,11 @@
 Communicate package.
 """
 
+import asyncio
 import json
 import re
 import ssl
+import threading
 import time
 import uuid
 from contextlib import nullcontext
@@ -475,7 +477,28 @@ class Communicate:
                     "No audio was received. Please verify that your parameters are correct."
                 )
 
-    async def save(
+    def sync_stream(self):
+        async def async_stream():
+            async for item in self.stream():
+                yield item
+
+        loop = asyncio.get_event_loop()
+        # Create the generator object
+        gen = async_stream()
+
+        while True:
+            try:
+                # Run the async generator iteration
+                data = loop.run_until_complete(gen.__anext__())
+                yield data
+            except StopAsyncIteration:
+                # When the async generator is exhausted, stop the iteration
+                break
+            except Exception as e:
+                # Handle exceptions that may occur during async execution
+                raise e
+
+    def sync_save(
         self,
         audio_fname: Union[str, bytes],
         metadata_fname: Optional[Union[str, bytes]] = None,
@@ -483,18 +506,22 @@ class Communicate:
         """
         Save the audio and metadata to the specified files.
         """
-        metadata: Union[TextIOWrapper, ContextManager[None]] = (
-            open(metadata_fname, "w", encoding="utf-8")
-            if metadata_fname is not None
-            else nullcontext()
-        )
-        with metadata, open(audio_fname, "wb") as audio:
-            async for message in self.stream():
-                if message["type"] == "audio":
-                    audio.write(message["data"])
-                elif (
-                    isinstance(metadata, TextIOWrapper)
-                    and message["type"] == "WordBoundary"
-                ):
-                    json.dump(message, metadata)
-                    metadata.write("\n")
+        done_event = threading.Event()
+
+        def run_in_thread():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+            async def async_task():
+                # Your async operation
+                await self.save(audio_fname)
+                # Signal that the task is done
+                done_event.set()
+
+            loop.run_until_complete(async_task())
+            loop.close()
+
+        thread = threading.Thread(target=run_in_thread)
+        thread.start()
+        done_event.wait()
+        thread.join()
